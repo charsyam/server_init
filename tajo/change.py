@@ -5,7 +5,8 @@ target = "../%s/"%(sys.argv[1])
 exts = [
         ".java",
         ".proto",
-        ".g"
+        ".g",
+        ".xml"
         ]
 for dirname, dirnames, filenames in os.walk('.'):
     for subdirname in dirnames:
@@ -20,13 +21,27 @@ for dirname, dirnames, filenames in os.walk('.'):
             t = open(newpath, "w")
             lines = f.readlines()
             for line in lines:
-                if "tajo" in line:
-                    if ext == ".proto" and "import" in line:
-                        pass
-                    else:
-                        newline = line.replace('tajo','org.apache.tajo')
-                        print fullpath
-                        line = newline
+                if "import tajo" in line:
+                    newline = line.replace('import tajo','import org.apache.tajo')
+                    print fullpath
+                    line = newline
+                elif "package tajo" in line:
+                    newline = line.replace('package tajo','package org.apache.tajo')
+                    print fullpath
+                    line = newline
+                elif "java_package = \"tajo" in line:
+                    newline = line.replace('java_package = \"tajo','java_package = \"org.apache.tajo')
+                    print fullpath
+                    line = newline
+                elif "import static tajo" in line:
+                    newline = line.replace('import static tajo', 'import static org.apache.tajo')
+                    print fullpath
+                    line = newline
+                elif "tajo." in line:
+                    newline = line.replace('tajo.', 'org.apache.tajo.')
+                    print fullpath
+                    line = newline
+            
 
                 t.write(line)
 

@@ -1,0 +1,174 @@
+diff --git src/nc_conf.c src/nc_conf.c
+index 325657b..dd4e29d 100644
+--- src/nc_conf.c
++++ src/nc_conf.c
+@@ -74,6 +74,10 @@ static struct command conf_commands[] = {
+       conf_set_bool,
+       offsetof(struct conf_pool, redis) },
+ 
++    { string("always_resolve_host"),
++      conf_set_bool,
++      offsetof(struct conf_pool, always_resolve_host) },
++
+     { string("preconnect"),
+       conf_set_bool,
+       offsetof(struct conf_pool, preconnect) },
+@@ -106,6 +110,7 @@ conf_server_init(struct conf_server *cs)
+ {
+     string_init(&cs->pname);
+     string_init(&cs->name);
++    string_init(&cs->address);
+     cs->port = 0;
+     cs->weight = 0;
+ 
+@@ -121,6 +126,7 @@ conf_server_deinit(struct conf_server *cs)
+ {
+     string_deinit(&cs->pname);
+     string_deinit(&cs->name);
++    string_deinit(&cs->address);
+     cs->valid = 0;
+     log_debug(LOG_VVERB, "deinit conf server %p", cs);
+ }
+@@ -185,6 +191,7 @@ conf_pool_init(struct conf_pool *cp, struct string *name)
+     cp->client_connections = CONF_UNSET_NUM;
+ 
+     cp->redis = CONF_UNSET_NUM;
++    cp->always_resolve_host = CONF_UNSET_NUM;
+     cp->preconnect = CONF_UNSET_NUM;
+     cp->auto_eject_hosts = CONF_UNSET_NUM;
+     cp->server_connections = CONF_UNSET_NUM;
+@@ -269,6 +276,7 @@ conf_pool_each_transform(void *elem, void *data)
+     sp->hash_tag = cp->hash_tag;
+ 
+     sp->redis = cp->redis ? 1 : 0;
++    sp->always_resolve_host = cp->always_resolve_host ? 1 : 0;
+     sp->timeout = cp->timeout;
+     sp->backlog = cp->backlog;
+ 
+@@ -321,6 +329,7 @@ conf_dump(struct conf *cf)
+         log_debug(LOG_VVERB, "  client_connections: %d",
+                   cp->client_connections);
+         log_debug(LOG_VVERB, "  redis: %d", cp->redis);
++        log_debug(LOG_VVERB, "  always_resolve_host: %d", cp->always_resolve_host);
+         log_debug(LOG_VVERB, "  preconnect: %d", cp->preconnect);
+         log_debug(LOG_VVERB, "  auto_eject_hosts: %d", cp->auto_eject_hosts);
+         log_debug(LOG_VVERB, "  server_connections: %d",
+@@ -1239,6 +1248,10 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
+         cp->redis = CONF_DEFAULT_REDIS;
+     }
+ 
++    if (cp->always_resolve_host == CONF_UNSET_NUM) {
++        cp->always_resolve_host = CONF_DEFAULT_ALWAYS_RESOLVE_HOST;
++    }
++
+     if (cp->preconnect == CONF_UNSET_NUM) {
+         cp->preconnect = CONF_DEFAULT_PRECONNECT;
+     }
+@@ -1501,10 +1514,8 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
+     uint8_t *p, *q, *start;
+     uint8_t *pname, *addr, *port, *weight, *name;
+     uint32_t k, delimlen, pnamelen, addrlen, portlen, weightlen, namelen;
+-    struct string address;
+     char delim[] = " ::";
+ 
+-    string_init(&address);
+     p = conf;
+     a = (struct array *)(p + cmd->offset);
+ 
+@@ -1614,18 +1625,16 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
+         return CONF_ERROR;
+     }
+ 
+-    status = string_copy(&address, addr, addrlen);
++    status = string_copy(&field->address, addr, addrlen);
+     if (status != NC_OK) {
+         return CONF_ERROR;
+     }
+ 
+-    status = nc_resolve(&address, field->port, &field->info);
++    status = nc_resolve(&field->address, field->port, &field->info);
+     if (status != NC_OK) {
+-        string_deinit(&address);
+         return CONF_ERROR;
+     }
+ 
+-    string_deinit(&address);
+     field->valid = 1;
+ 
+     return CONF_OK;
+diff --git src/nc_conf.h src/nc_conf.h
+index 648baae..a2afce4 100644
+--- src/nc_conf.h
++++ src/nc_conf.h
+@@ -47,6 +47,7 @@
+ #define CONF_DEFAULT_LISTEN_BACKLOG          512
+ #define CONF_DEFAULT_CLIENT_CONNECTIONS      0
+ #define CONF_DEFAULT_REDIS                   false
++#define CONF_DEFAULT_ALWAYS_RESOLVE_HOST     false
+ #define CONF_DEFAULT_PRECONNECT              false
+ #define CONF_DEFAULT_AUTO_EJECT_HOSTS        false
+ #define CONF_DEFAULT_SERVER_RETRY_TIMEOUT    30 * 1000      /* in msec */
+@@ -65,6 +66,7 @@ struct conf_listen {
+ struct conf_server {
+     struct string   pname;      /* server: as "name:port:weight" */
+     struct string   name;       /* name */
++    struct string   address;    /* address */
+     int             port;       /* port */
+     int             weight;     /* weight */
+     struct sockinfo info;       /* connect socket info */
+@@ -81,6 +83,7 @@ struct conf_pool {
+     int                backlog;               /* backlog: */
+     int                client_connections;    /* client_connections: */
+     int                redis;                 /* redis: */
++    int                always_resolve_host;   /* always_resolve_host: */
+     int                preconnect;            /* preconnect: */
+     int                auto_eject_hosts;      /* auto_eject_hosts: */
+     int                server_connections;    /* server_connections: */
+diff --git src/nc_server.c src/nc_server.c
+index 75e379a..2b8303b 100644
+--- src/nc_server.c
++++ src/nc_server.c
+@@ -457,6 +457,17 @@ server_connect(struct context *ctx, struct server *server, struct conn *conn)
+     log_debug(LOG_VVERB, "connect to server '%.*s'", server->pname.len,
+               server->pname.data);
+ 
++    struct server_pool *pool = server->owner;
++    if (pool->always_resolve_host) {
++        nc_resolve(&(server->address), server->port, &(server->info));
++        server->addr = (struct sockaddr *)&(server->info.addr);
++        conn->addr = server->addr;
++        struct in_addr inaddr = ((struct sockaddr_in *)(server->addr))->sin_addr;
++        unsigned char *ptr = (char *)(&inaddr);
++        log_debug(LOG_NOTICE, "resolve ip: %u.%u.%u.%u", 
++            ptr[0], ptr[1], ptr[2], ptr[3]);
++    }
++
+     conn->sd = socket(conn->family, SOCK_STREAM, 0);
+     if (conn->sd < 0) {
+         log_error("socket for server '%.*s' failed: %s", server->pname.len,
+diff --git src/nc_server.h src/nc_server.h
+index 7d0f132..c763843 100644
+--- src/nc_server.h
++++ src/nc_server.h
+@@ -76,11 +76,13 @@ struct server {
+ 
+     struct string      pname;         /* name:port:weight (ref in conf_server) */
+     struct string      name;          /* name (ref in conf_server) */
++    struct string      address;       /* name:port (ref in conf_server) */
+     uint16_t           port;          /* port */
+     uint32_t           weight;        /* weight */
+     int                family;        /* socket family */
+     socklen_t          addrlen;       /* socket length */
+     struct sockaddr    *addr;         /* socket address (ref in conf_server) */
++    struct sockinfo    info;          /* connect socket info */
+ 
+     uint32_t           ns_conn_q;     /* # server connection */
+     struct conn_tqh    s_conn_q;      /* server connection q */
+@@ -124,6 +126,7 @@ struct server_pool {
+     unsigned           auto_eject_hosts:1;   /* auto_eject_hosts? */
+     unsigned           preconnect:1;         /* preconnect? */
+     unsigned           redis:1;              /* redis? */
++    unsigned           always_resolve_host:1;/* always_resolve_host? */
+ };
+ 
+ void server_ref(struct conn *conn, void *owner);
